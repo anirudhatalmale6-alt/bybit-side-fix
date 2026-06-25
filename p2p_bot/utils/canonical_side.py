@@ -77,6 +77,20 @@ def canonical_side_from_bybit_response(side_value: Any) -> str | None:
     return None
 
 
+def bybit_v5_side_code(canonical_side: str) -> str:
+    """Side code for the V5 official API (advertiser perspective).
+
+    The V5 /v5/p2p/item/online and /v5/p2p/item/create endpoints use
+    advertiser-perspective side codes:
+      "0" = advertiser buys  crypto → for our canonical SELL (find buyers)
+      "1" = advertiser sells crypto → for our canonical BUY  (find sellers)
+
+    This is the OPPOSITE of the legacy public endpoint's tab convention
+    used by bybit_api_side_code().
+    """
+    return "0" if normalize_side(canonical_side) == SELL else "1"
+
+
 def bybit_web_action(canonical_side: str, *, asset: str = "USDT") -> str:
     _ = asset
     return normalize_side(canonical_side)

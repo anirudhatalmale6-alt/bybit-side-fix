@@ -73,21 +73,7 @@ class BybitP2PClient:
         size: int = 20,
     ) -> list[P2POrder]:
         canonical_side = normalize_side(side)
-        # Keep official scan parameters as strings; the live Bybit endpoint rejects ints.
-        payload = {
-            "tokenId": asset,
-            "currencyId": fiat,
-            "side": bybit_api_side_code(canonical_side),
-            "page": str(page),
-            "size": str(size),
-        }
-        self.logger.debug(
-            "Bybit online ads fetch asset=%s fiat=%s side=%s api_side=%s",
-            asset,
-            fiat,
-            canonical_side,
-            payload["side"],
-        )
+        legacy_side_code = bybit_api_side_code(canonical_side)
 
         if (
             self.config.use_official_p2p_api
@@ -95,8 +81,26 @@ class BybitP2PClient:
             and self.private_api_access_allowed
             and not self._official_scan_disabled
         ):
+            # V5 official API uses advertiser-perspective side convention:
+            #   "0" = buy ads  (advertisers buying crypto)  → counterparties for our SELL
+            #   "1" = sell ads (advertisers selling crypto) → counterparties for our BUY
+            v5_side_code = "0" if canonical_side == "sell" else "1"
+            v5_payload = {
+                "tokenId": asset,
+                "currencyId": fiat,
+                "side": v5_side_code,
+                "page": str(page),
+                "size": str(size),
+            }
+            self.logger.debug(
+                "Bybit V5 online ads fetch asset=%s fiat=%s canonical_side=%s v5_side=%s",
+                asset,
+                fiat,
+                canonical_side,
+                v5_side_code,
+            )
             response = await self._try_official_online_ads(
-                payload,
+                v5_payload,
                 asset=asset,
                 fiat=fiat,
                 side=canonical_side,
@@ -117,12 +121,29 @@ class BybitP2PClient:
                     await self._load_public_payment_catalog()
                 orders = []
                 for item in items:
-                    parsed = self._parse_online_ad(item, canonical_side, asset, fiat)
+                    parsed = self._parse_online_ad_v5(item, canonical_side, asset, fiat)
                     if parsed is not None:
                         orders.append(parsed)
                 return orders
 
-        legacy_payload = {**payload, "amount": ""}
+        # Legacy public endpoint uses tab/user-perspective side convention:
+        #   "1" = Sell tab (user sells) → counterparties for our SELL
+        #   "0" = Buy tab  (user buys)  → counterparties for our BUY
+        legacy_payload = {
+            "tokenId": asset,
+            "currencyId": fiat,
+            "side": legacy_side_code,
+            "page": str(page),
+            "size": str(size),
+            "amount": "",
+        }
+        self.logger.debug(
+            "Bybit legacy online ads fetch asset=%s fiat=%s canonical_side=%s legacy_side=%s",
+            asset,
+            fiat,
+            canonical_side,
+            legacy_side_code,
+        )
         response = await self._legacy_post(self.config.legacy_public_scan_url, legacy_payload)
         result = response.get("result") or response
         items = result.get("items") or result.get("data") or []
@@ -550,6 +571,80 @@ class BybitP2PClient:
             platform="bybit",
             order_id=str(item.get("id") or ""),
             side=response_side or requested_side,
+            asset=response_asset,
+            fiat=response_fiat,
+            price=_decimal(item.get("price")),
+            min_amount=_decimal(item.get("minAmount")),
+            max_amount=_decimal(item.get("maxAmount")),
+            available=_decimal(item.get("lastQuantity") or item.get("quantity")),
+            payment_methods=payment_methods,
+            merchant_id=str(item.get("userId") or item.get("accountId") or ""),
+            merchant_rating=_float_percentage(item.get("recentExecuteRate")),
+            merchant_orders=int(float(item.get("recentOrderNum") or item.get("orderNum") or 0)),
+            merchant_days=0,
+            merchant_name=str(item.get("nickName") or item.get("userMaskId") or ""),
+            merchant_online=bool(item.get("isOnline")) if item.get("isOnline") is not None else None,
+            merchant_kyc=merchant_kyc,
+            merchant_last_active_minutes=merchant_last_active_minutes,
+            raw=item,
+        )
+
+    def _parse_online_ad_v5(
+        self,
+        item: dict[str, Any],
+        requested_side: str,
+        asset: str,
+        fiat: str,
+    ) -> P2POrder | None:
+        """Parse a V5 official API response item.
+
+        The V5 endpoint uses advertiser-perspective side codes:
+          "0" = advertiser buys  → counterparty for our canonical "sell"
+          "1" = advertiser sells → counterparty for our canonical "buy"
+
+        We validate the asset/fiat pair but skip raw-side validation since
+        the V5 convention differs from the legacy tab convention used by
+        canonical_side_from_bybit_response.  The canonical side is always
+        taken from the caller (requested_side).
+        """
+        response_asset = str(item.get("tokenId") or asset).upper()
+        response_fiat = str(item.get("currencyId") or fiat).upper()
+        if response_asset != asset.upper() or response_fiat != fiat.upper():
+            self.logger.warning(
+                "Skipping Bybit V5 ad %s due to pair mismatch: requested=%s/%s response=%s/%s",
+                item.get("id") or "",
+                asset.upper(),
+                fiat.upper(),
+                response_asset,
+                response_fiat,
+            )
+            return None
+        payment_values = item.get("payments") or []
+        payment_methods = []
+        for value in payment_values:
+            payment_methods.append(self._payment_catalog.get(str(value), str(value)))
+        trading_pref = item.get("tradingPreferenceSet") or {}
+        merchant_kyc = None
+        if item.get("authStatus") is not None or trading_pref.get("isKyc") is not None:
+            merchant_kyc = bool(int(item.get("authStatus") or 0) == 1 or int(trading_pref.get("isKyc") or 0) == 1)
+        merchant_last_active_minutes = None
+        last_logout_time = item.get("lastLogoutTime")
+        if last_logout_time not in (None, ""):
+            try:
+                logout_ts = float(last_logout_time)
+                if logout_ts > 10_000_000_000:
+                    logout_ts /= 1000
+                merchant_last_active_minutes = max(
+                    int((datetime.now(timezone.utc).timestamp() - logout_ts) // 60),
+                    0,
+                )
+            except (TypeError, ValueError):
+                merchant_last_active_minutes = None
+
+        return P2POrder(
+            platform="bybit",
+            order_id=str(item.get("id") or ""),
+            side=requested_side,
             asset=response_asset,
             fiat=response_fiat,
             price=_decimal(item.get("price")),

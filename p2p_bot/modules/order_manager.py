@@ -15,6 +15,7 @@ from p2p_bot.state import AppState, utc_now
 from p2p_bot.utils.bybit_p2p import BybitP2PClient
 from p2p_bot.utils.canonical_side import (
     bybit_api_side_code,
+    bybit_v5_side_code,
     canonical_side_from_bybit_response,
     normalize_side,
 )
@@ -58,7 +59,7 @@ class ManagedAdSnapshot:
         return {
             "tokenId": self.asset,
             "currencyId": self.fiat,
-            "side": bybit_api_side_code(normalize_side(self.side)),
+            "side": bybit_v5_side_code(normalize_side(self.side)),
             "priceType": self.price_type,
             "premium": self.premium,
             "price": str(self.price),
