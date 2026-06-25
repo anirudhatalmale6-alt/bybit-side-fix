@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "p2p-bot"
+version = "0.1.0"
+description = "Async P2P arbitrage bot scaffold for Bybit and Binance"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "aiohttp>=3.11,<4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+p2p-bot = "p2p_bot.main:main"
+
+[tool.setuptools.packages.find]
+include = ["p2p_bot*"]
