@@ -1022,6 +1022,9 @@ class Analyzer:
             orders,
             key=lambda order: self._candidate_book_price_key(order, prefer_high_price=prefer_high_price),
         )
+        for rank, order in enumerate(price_sorted, start=1):
+            if isinstance(order.raw, dict):
+                order.raw["_raw_book_rank"] = rank
         pool = price_sorted[:pool_depth]
         if not pool:
             return []
